@@ -1,0 +1,373 @@
+Tech Support CTF Writeup
+Target Information
+
+    Machine: Tech Support (TryHackMe)
+
+    IP Address: 10.48.180.109
+
+    Operating System: Ubuntu Linux
+
+    VHost: techsupport.thm
+
+Initial Reconnaissance
+Port Scan Results
+bash
+
+nmap -sC -sV 10.48.180.109
+
+Open Ports:
+
+    22/tcp: OpenSSH 7.2p2
+
+    80/tcp: Apache httpd 2.4.18
+
+    139/tcp: Samba smbd 4.3.11
+
+    445/tcp: Samba smbd 4.3.11
+
+Web Enumeration
+
+Gobuster Output:
+text
+
+/phpinfo.php          (200)
+/test/                (200)
+/wordpress/wp-login.php (200)
+/subrion/             (Discovered later)
+
+Phase 1: Initial Access
+Step 1: SMB Share Investigation
+
+Connected to the SMB share:
+bash
+
+smbclient //10.48.180.109/websvr
+
+Found File: enter.txt
+Contents:
+text
+
+GOALS
+=====
+1)Make fake popup and host it online on Digital Ocean server
+2)Fix subrion site, /subrion doesn't work, edit from panel
+3)Edit wordpress website
+
+IMP
+===
+Subrion creds
+|->admin:7sKvntXdPEJaxazce9PXi24zaFrLiKWCk [cooked with magical formula]
+Wordpress creds
+
+Step 2: Subrion CMS Access
+
+Located Subrion CMS at /subrion/panel.
+
+The encoded password required decoding. Testing various encoding methods revealed the credentials:
+
+    Username: admin
+
+    Password: Scam2021
+
+Step 3: Web Shell Upload
+
+Logged into Subrion panel and uploaded a PHP web shell via the file manager functionality, gaining initial command execution on the web server.
+Phase 2: Lateral Movement
+Step 4: WordPress Configuration Discovery
+
+Enumerated the filesystem from the web shell and located WordPress configuration:
+bash
+
+cat /var/www/html/wordpress/wp-config.php
+
+Found Database Credentials:
+php
+
+define( 'DB_PASSWORD', 'ImAScammerLOL!123!' );
+
+Step 5: SSH Access
+
+Attempted SSH login with discovered credentials:
+bash
+
+ssh scamsite@10.48.180.109
+
+Credentials Used:
+
+    Username: scamsite (based on context)
+
+    Password: ImAScammerLOL!123!
+
+Successfully gained SSH access to the machine.
+Phase 3: Privilege Escalation
+Step 6: Sudo Privilege Enumeration
+
+Checked sudo permissions:
+bashTech Support CTF Writeup
+Overview
+
+This is a walkthrough for the "Tech Support" room on TryHackMe. The target is a Linux machine hosting multiple services including web applications and SMB shares.
+Reconnaissance
+Target Information
+
+    IP Address: 10.48.180.109
+
+    VHost: techsupport.thm
+
+    Operating System: Ubuntu Linux
+
+Nmap Scan Results
+bash
+
+PORT    STATE SERVICE     VERSION
+22/tcp  open  ssh         OpenSSH 7.2p2 Ubuntu 4ubuntu2.10
+80/tcp  open  http        Apache httpd 2.4.18
+139/tcp open  netbios-ssn Samba smbd 3.X - 4.X
+445/tcp open  netbios-ssn Samba smbd 4.3.11-Ubuntu
+
+Web Enumeration
+
+Directory scanning revealed:
+
+    /phpinfo.php - PHP information page
+
+    /test/ - Directory listing
+
+    /wordpress/wp-login.php - WordPress login page
+
+    /subrion/ - Subrion CMS (accessible later)
+
+Initial Access
+Step 1: SMB Share Enumeration
+
+Connected to the SMB share using smbclient:
+bash
+
+smbclient \\\\10.48.180.109\\websvr\\
+
+Found enter.txt containing valuable information:
+
+enter.txt contents:
+text
+
+GOALS
+=====
+1)Make fake popup and host it online on Digital Ocean server
+2)Fix subrion site, /subrion doesn't work, edit from panel
+3)Edit wordpress website
+
+IMP
+===
+Subrion creds
+|->admin:7sKvntXdPEJaxazce9PXi24zaFrLiKWCk [cooked with magical formula]
+Wordpress creds
+
+Step 2: Subrion CMS Access
+
+Accessed /subrion/panel and attempted login with the found credentials. The password needed decoding using ROT13:
+
+    Encoded: 7sKvntXdPEJaxazce9PXi24zaFrLiKWCk
+
+    Decoded (ROT13): Scam2021
+
+Successfully logged into Subrion with:
+
+    Username: admin
+
+    Password: Scam2021
+
+Step 3: Web Shell Upload
+
+Uploaded a PHP web shell through Subrion's file manager functionality to gain initial foothold on the system.
+Step 4: WordPress Credentials Discovery
+
+Enumerated WordPress configuration files and found database credentials in wp-config.php:
+php
+
+define( 'DB_PASSWORD', 'ImAScammerLOL!123!' );
+
+Lateral Movement
+Step 5: SSH Access
+
+Attempted SSH login with discovered credentials:
+
+    Username: scamsite (educated guess)
+
+    Password: ImAScammerLOL!123!
+
+Successfully gained SSH access to the machine.
+Privilege Escalation
+Step 6: Sudo Privileges Enumeration
+
+Checked sudo permissions:
+bash
+
+sudo -l
+
+Output:
+text
+
+User scamsite may run the following commands on TechSupport:
+    (ALL) NOPASSWD: /usr/bin/iconv
+
+Step 7: Exploiting iconv Sudo Permission
+
+The iconv command can read any file on the system. Used it to read the root flag:
+bash
+
+sudo /usr/bin/iconv -f ISO-8859-1 -t UTF-8 /root/root.txt
+
+Capture the Flag
+
+Successfully retrieved the root flag using the iconv privilege escalation technique.
+Key Learnings
+
+    Credential Storage: The machine stored credentials insecurely in SMB shares
+
+    Password Obfuscation: Simple encoding (ROT13) was used to hide passwords
+
+    Privilege Escalation: Misconfigured sudo permissions (NOPASSWD on file reading utilities) can lead to full system compromise
+
+    Attack Surface: Multiple web applications (WordPress, Subrion) increased the attack surface
+
+    Password Reuse: Database passwords were reused for system accounts
+
+Timeline of Attack
+
+    SMB enumeration → Found encoded credentials
+
+    ROT13 decoding → Gained Subrion admin access
+
+    Web shell upload → Initial system access
+
+    Configuration file enumeration → Discovered WordPress database password
+
+    SSH brute force/credential reuse → Gained SSH access
+
+    Sudo misconfiguration → Privilege escalation via iconv
+
+Security Recommendations
+
+    Implement proper password policies
+
+    Avoid password reuse across services
+
+    Regularly audit sudo permissions
+
+    Use proper file permissions on configuration files
+
+    Remove unnecessary services and shares
+
+    Implement proper credential storage mechanisms
+
+This writeup is for educational purposes only. Always practice ethical hacking and only test systems you have explicit permission to assess.
+
+
+sudo -l
+
+Output:
+text
+
+User scamsite may run the following commands on TechSupport:
+    (ALL) NOPASSWD: /usr/bin/iconv
+
+Step 7: Exploiting iconv Permission
+
+The iconv command can read files when run with sudo privileges. Used it to access restricted files:
+
+Read root flag:
+bash
+
+sudo /usr/bin/iconv -f ISO-8859-1 -t UTF-8 /root/root.txt
+
+Additional enumeration performed:
+bash
+
+# Read shadow file
+sudo /usr/bin/iconv -f ISO-8859-1 -t UTF-8 /etc/shadow
+
+# Check sudoers configuration
+sudo /usr/bin/iconv -f ISO-8859-1 -t UTF-8 /etc/sudoers
+
+Key Findings
+Attack Path Summary
+
+    Information Disclosure: SMB share exposed encoded credentials
+
+    Weak Encoding: Password protection easily bypassed
+
+    Credential Reuse: Database password reused for system account
+
+    Excessive Privileges: Sudo misconfiguration allowed file read as root
+
+Security Issues Identified
+
+    SMB share with world-readable sensitive files
+
+    Weak password encoding/obfuscation
+
+    Password reuse across services
+
+    Excessive sudo permissions without password requirement
+
+    Web application allowing arbitrary file upload
+
+Remediation Recommendations
+
+    Access Control
+
+        Restrict SMB share permissions
+
+        Implement proper file permissions on configuration files
+
+        Remove world-readable access to sensitive files
+
+    Credential Management
+
+        Use strong, unique passwords for each service
+
+        Implement proper password hashing (bcrypt, Argon2)
+
+        Avoid storing credentials in plaintext or weakly encoded forms
+
+    Privilege Management
+
+        Review and restrict sudo permissions
+
+        Implement principle of least privilege
+
+        Require password for sudo commands when possible
+
+    Web Application Security
+
+        Implement file upload restrictions
+
+        Validate file types and content
+
+        Use web application firewall
+
+    Monitoring
+
+        Monitor for unauthorized file access
+
+        Log sudo command usage
+
+        Implement intrusion detection system
+
+Timeline
+
+    Port scanning and service enumeration
+
+    SMB share discovery and credential extraction
+
+    Subrion CMS access and web shell deployment
+
+    Internal enumeration and credential discovery
+
+    SSH access and lateral movement
+
+    Sudo privilege escalation via iconv
+
+    Root flag capture
+
+This report documents the attack methodology for educational purposes. Always ensure you have proper authorization before testing systems.
