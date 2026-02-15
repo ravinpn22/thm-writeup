@@ -154,7 +154,7 @@ I saved the leaked password to a file for cracking:
 Command: cat > passwords.txt
 (Pasted the password from pwm output)
 
-
+I use hydra to brute force the password from the list obtained from the pwm.
 Username: think
 Password: josemario.AKA(think)
 
