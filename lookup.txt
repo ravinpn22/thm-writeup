@@ -149,12 +149,11 @@ fake user data and then dump password hashes from system files.
 
 Password Cracking:
 ------------------
-I saved the leaked password hashes to a file for cracking:
+I saved the leaked password to a file for cracking:
 
 Command: cat > passwords.txt
-(Pasted the hashes from pwm output)
+(Pasted the password from pwm output)
 
-Using hash identification and cracking tools, one hash was successfully cracked:
 
 Username: think
 Password: josemario.AKA(think)
